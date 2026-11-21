@@ -24,14 +24,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from torch_geometric.utils import k_hop_subgraph
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src import config as C  # noqa: E402
 from src.data import load_elliptic  # noqa: E402
 from src.explain import GraphContext, ig_edges  # noqa: E402
 from src.faithfulness import jaccard  # noqa: E402
-from src.model import load_model  # noqa: E402
+from src.model import load_model, model_path  # noqa: E402
+from src.protocol import leads_to  # noqa: E402
 
 K_TOP = 5
 PREC_MIN, CF_MAX, JAC_MIN = 0.7, 3, 0.5
@@ -83,14 +83,14 @@ def main():
     if cache.exists():
         stab = pd.read_csv(cache)
     else:
-        print(f"== C4: IG для сидов {[s for s in C.SEEDS if s != args.seed]} на {len(df)} алертах")
+        others = [s for s in C.SEEDS if s != args.seed and model_path(s, args.out).exists()]
+        print(f"== C4: IG для сидов {others} на {len(df)} алертах")
         models = {}
-        for s in C.SEEDS:
-            if s != args.seed:
-                m = load_model(s, data.num_features, args.out)
-                for p in m.parameters():
-                    p.requires_grad_(False)
-                models[s] = m
+        for s in others:
+            m = load_model(s, data.num_features, args.out)
+            for p in m.parameters():
+                p.requires_grad_(False)
+            models[s] = m
         rows, t1 = [], time.time()
         for i, v in enumerate(df.v):
             nb = ctx.neighborhood(int(v))
@@ -111,16 +111,6 @@ def main():
     und = ctx.ei_und
     ei = data.edge_index.numpy()
 
-    def reaches(v, edge_id, ok_mask):
-        a, b = ei[:, edge_id]
-        start = [u for u in (a, b) if u != v]
-        if not start:
-            return False
-        nodes, _, _, _ = k_hop_subgraph(start, 2, und, num_nodes=data.num_nodes)
-        nodes = nodes.numpy()
-        nodes = nodes[nodes != v]
-        return bool(ok_mask[nodes].any())
-
     ok_strict = y == C.ILLICIT
     ok_doc = ok_strict | flag
     c5d, c5s = [], []
@@ -130,8 +120,8 @@ def main():
             c5s.append(False)
             continue
         S = [int(e) for e in str(r.cf_removed).split()]
-        c5d.append(all(reaches(r.v, e, ok_doc) for e in S))
-        c5s.append(all(reaches(r.v, e, ok_strict) for e in S))
+        c5d.append(leads_to(r.v, S, ok_doc, ei, und, data.num_nodes))
+        c5s.append(leads_to(r.v, S, ok_strict, ei, und, data.num_nodes))
     df["C5_doc"], df["C5_strict"] = c5d, c5s
     base = df.C1 & df.C2 & df.C3 & df.C4
     df["valid_doc"] = base & df.C5_doc
@@ -192,7 +182,7 @@ def main():
         r = sub.sort_values("p", ascending=False).iloc[0]
         v = int(r.v)
         g = ig_by_v.get(v, empty).copy()
-        g = g.reindex(g.ig.abs().sort_values(ascending=False).index).head(K_TOP)
+        g = g.sort_values("ig", ascending=False).head(K_TOP)  # тот же порядок, что проверяли M-1…M-3
         lines = [f"# Алерт: транзакция {int(r.tx_id)} (шаг {int(r.step)})", "",
                  f"- Скор модели p_illicit = {r.p:.3f} (порог τ = {tau:.3f}); "
                  f"истинная метка: **{r.label_name}** (аналитику не видна)",
@@ -201,7 +191,7 @@ def main():
                  f"окружение в графе {r.m2_edges:+.2f}",
                  f"- Без потоков окрестности флаг {'**сохраняется**' if r.z_no_edges >= np.log(tau / (1 - tau)) else 'снимается'}",
                  "", "**Потоки с наибольшим вкладом (М1)**", "",
-                 "| поток | направление | вклад IG | метка соседа | скор соседа |", "|---|---|---|---|---|"]
+                 "| поток | направление | вклад IG | скор соседа |", "|---|---|---|---|"]
         adj = set(ei[1, ei[0] == v].tolist()) | set(ei[0, ei[1] == v].tolist())
         for e in g.itertuples():
             if v in (e.src, e.dst):
@@ -210,15 +200,22 @@ def main():
                 nbh = e.dst if e.src in adj else e.src
             direction = "вход в алерт" if e.dst == v else ("выход из алерта" if e.src == v else "2-й хоп")
             lines.append(f"| {int(data.tx_id[e.src])} → {int(data.tx_id[e.dst])} | {direction} | {e.ig:+.2f} | "
-                         f"{LABEL[int(y[nbh])]} | {p_all[nbh]:.2f} |")
+                         f"{p_all[nbh]:.2f} |")
         kn = knn[knn.v == v]
         lines += ["", "**Похожие закрытые случаи (М3, шаги 1–29)**", "",
                   "| txId | метка | шаг | сходство |", "|---|---|---|---|"]
         lines += [f"| {k.nbr_tx_id} | {k.nbr_label} | {k.nbr_step} | {k.sim:.2f} |" for k in kn.itertuples()]
+        n_ill = int((kn.nbr_label == "illicit").sum())
+        holds = r.z_no_edges >= np.log(tau / (1 - tau))
+        lines += ["", f"**Сигналы надёжности (М6):** флаг без потоков — {'да' if holds else 'нет'}; "
+                      f"прецеденты — {n_ill} из 5 illicit → группа "
+                      f"{'A' if holds and n_ill >= 3 else 'B' if holds else 'C' if n_ill >= 3 else 'D'} "
+                      f"(A — проверять первым, D — последним)"]
         cf_txt = (f"убрать {int(r.cf_size)} поток(а) — флаг снимается" if r.cf_success
                   else "флаг не снимается удалением до 10 потоков: решение держится на признаках транзакции")
         lines += ["", f"**Контрфактуал (М4):** {cf_txt}", "",
-                  f"**Протокол М5:** C1 {r.C1}, C2 {r.C2}, C3 {r.C3}, C4 {r.C4}, C5 {r.C5_strict} → "
+                  f"**Протокол М5 v1 (ретроспективно: C1 и C5 используют метки того же шага):** "
+                  f"C1 {r.C1}, C2 {r.C2}, C3 {r.C3}, C4 {r.C4}, C5 {r.C5_strict} → "
                   f"{'годное обоснование' if r.valid_strict else 'только повод для ручной проверки'}"]
         (cards / f"{name}.md").write_text("\n".join(lines))
     print(f"\nКарточки: {cards}. Готово за {(time.time() - t0) / 60:.1f} мин.")

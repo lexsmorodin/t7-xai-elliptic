@@ -94,7 +94,9 @@ def main():
         attr = np.array([ig_by_v.get(r.v, {}).get(int(e), 0.0) for e in ids])
         o_ig = topk(attr, n)
         src, dst = data.edge_index[:, ids].numpy()
-        o_deg = np.argsort(-np.maximum(deg[src], deg[dst]), kind="stable")
+        # степень «другого» конца: для потоков алерта — соседа, для потоков 2-го хопа — большего из концов
+        other = np.where(src == r.v, deg[dst], np.where(dst == r.v, deg[src], np.maximum(deg[src], deg[dst])))
+        o_deg = np.argsort(-other, kind="stable")
         fid = fidelity(model, data, nb, o_ig, K_TOP, lt)
         rand_fid = [fidelity(model, data, nb, rng.permutation(n), K_TOP, lt) for _ in range(N_RAND)]
         a_ig = aopc(deletion_curve(model, data, nb, o_ig, K_CURVE))

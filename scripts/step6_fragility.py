@@ -24,7 +24,6 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import torch
-from torch_geometric.utils import k_hop_subgraph
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src import config as C  # noqa: E402
@@ -33,6 +32,7 @@ from src.data import load_elliptic  # noqa: E402
 from src.explain import GraphContext, ig_edges  # noqa: E402
 from src.faithfulness import fidelity  # noqa: E402
 from src.model import load_model, log_odds  # noqa: E402
+from src.protocol import leads_to, wilson  # noqa: E402
 
 
 def frozen(seed, data, out):
@@ -109,16 +109,7 @@ def main():
     und = ctx.ei_und
     ei = data.edge_index.numpy()
 
-    def c5_strict(v, S):
-        for e in S:
-            start = [u for u in ei[:, e] if u != v]
-            if not start:
-                return False
-            nodes, _, _, _ = k_hop_subgraph(start, 2, und, num_nodes=data.num_nodes)
-            nodes = nodes.numpy()
-            if not (y[nodes[nodes != v]] == C.ILLICIT).any():
-                return False
-        return True
+    ok_strict = y == C.ILLICIT
 
     rows, t1 = [], time.time()
     for i, r in enumerate(shop.itertuples()):
@@ -134,7 +125,7 @@ def main():
             cf = greedy_cf(models[s], data, nb, tau[s])
             c2 = cf["success"] and cf["size"] <= 3
             c1 = prec_step[s][ts[v]] >= 0.7
-            valid = bool(c1 and c2 and c3 and stab[v] and c5_strict(v, cf["removed"]))
+            valid = bool(c1 and c2 and c3 and stab[v] and leads_to(v, cf["removed"], ok_strict, ei, und, data.num_nodes))
             rows.append(dict(v=v, seed=s, alert=True, valid=valid, label=r.label))
         if (i + 1) % 50 == 0 or i + 1 == len(shop):
             print(f"  {i + 1}/{len(shop)} | {time.time() - t1:.0f} c", flush=True)
@@ -145,8 +136,10 @@ def main():
     out = []
     for name, col in [("seed 0 (зафиксирован регулятором)", "valid_seed0"), ("лучший из 5 сидов (выбор банка)", "valid_any")]:
         sub = per_v[per_v[col]]
-        out.append(dict(вариант=name, годных=len(sub), доля=round(len(sub) / len(per_v), 3),
-                        precision=round(float((sub.label == C.ILLICIT).mean()), 3) if len(sub) else np.nan))
+        pr, lo, hi = wilson(int((sub.label == C.ILLICIT).sum()), len(sub))
+        dl, dlo, dhi = wilson(len(sub), len(per_v))
+        out.append(dict(вариант=name, годных=len(sub), доля=round(dl, 3), доля_ci=f"[{dlo:.3f}; {dhi:.3f}]",
+                        precision=round(pr, 3), precision_ci=f"[{lo:.3f}; {hi:.3f}]"))
     flip = per_v[per_v.valid_any != per_v.valid_seed0]
     out_df = pd.DataFrame(out)
     out_df.to_csv(args.out / "fragility" / "seed_shopping_summary.csv", index=False)

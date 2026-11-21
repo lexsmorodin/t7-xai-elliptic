@@ -1,6 +1,5 @@
 """Графики для отчёта и слайдов из артефактов шагов 1–6 → artifacts/figures/."""
 import argparse
-import shutil
 import sys
 from pathlib import Path
 
@@ -31,7 +30,12 @@ def main():
     fig_dir.mkdir(exist_ok=True)
     before = f"до {C.SHUTDOWN_STEP}"
 
-    shutil.copy(a.out / "fig_m10_f1_by_step.png", fig_dir / "1_m10_f1_by_step.png")
+    # 1. M-10 по шагам: строим заново из m10_by_step.csv (тем же кодом, что шаг 1)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("step1", Path(__file__).with_name("step1_models.py"))
+    step1 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(step1)
+    step1.plot_f1_by_step(pd.read_csv(a.out / "m10_by_step.csv"), fig_dir / "1_m10_f1_by_step.png")
 
     # 2. Верные и ложные алерты: что держит флаг
     br = pd.read_csv(exp / "step2_breakdown.csv")
@@ -56,33 +60,52 @@ def main():
     fig.savefig(fig_dir / "2_tp_vs_fp.png", dpi=160)
     plt.close(fig)
 
-    # 3. Протокол регулятора: precision «годных» алертов
-    pr = pd.read_csv(exp / "m5_precision.csv")
-    keep = ["все размеченные алерты", "C2: контрфактуал |S| ≤ 3", "valid_doc (протокол v1)",
-            "valid_strict (C5 только по меткам)", "флаг держится без рёбер"]
-    names = ["все алерты", "контрфактуал\n≤ 3 потоков", "годные\n(протокол v1)", "годные\n(строгий C5)",
-             "флаг держится\nбез потоков"]
-    pr = pr.set_index("группа").loc[keep]
-    fig, ax = plt.subplots(figsize=(7, 3.4))
-    bar(ax, names, pr.precision.tolist(), [GREY, ORANGE, ORANGE, BLUE, BLUE])
-    for i, n in enumerate(pr.n):
-        ax.text(i, 0.03, f"n={n}", ha="center", fontsize=8, color="white")
-    ax.set(ylim=(0, 1), ylabel="precision", title="Precision алертов, признанных «обоснованными»")
+    # 3. Протокол регулятора: precision групп против базы того же слоя (M-11, шаг 7)
+    m11 = pd.read_csv(exp / "m11_precision_ci.csv")
+    c1_layer = [s for s in m11["слой"].unique() if s.startswith("шаги C1")][0]
+    panels = [
+        ("35–42", "Шаги 35–42", [("все алерты слоя (база)", "все алерты"),
+                                  ("C2: контрфактуал ≤ 3 потоков (вычислим без меток)", "контрфактуал\n≤ 3 потоков"),
+                                  ("красный флаг: C2 и не C3 (ретроспективно)", "красный флаг\n(ретро)"),
+                                  ("флаг держится без потоков", "флаг держится\nбез потоков")]),
+        (c1_layer, "Шаги, где выполнено C1", [("все алерты слоя (база)", "все алерты"),
+                                              ("годные по протоколу v1", "годные v1"),
+                                              ("годные v1 со строгим C5", "v1, строгий\nC5"),
+                                              ("v2: годные (C1–C3 у ≥ 3 из 5 сидов)", "годные v2"),
+                                              ("флаг держится без потоков", "флаг держится\nбез потоков")]),
+    ]
+    fig, axes = plt.subplots(1, 2, figsize=(12, 3.8), gridspec_kw=dict(width_ratios=[4, 5]))
+    for ax, (layer, title, items) in zip(axes, panels):
+        sub = m11[m11["слой"] == layer].set_index("группа")
+        vals, lows, highs, ns = [], [], [], []
+        for g, _ in items:
+            r = sub.loc[g]
+            lo_, hi_ = [float(x) for x in r.ci.strip("[]").split(";")]
+            vals.append(r.precision); lows.append(r.precision - lo_); highs.append(hi_ - r.precision); ns.append(r.n)
+        colors = [GREY] + [BLUE if "без потоков" in n or "v2" in n else ORANGE for _, n in items[1:]]
+        xs = range(len(items))
+        ax.bar(xs, vals, color=colors, yerr=[lows, highs], capsize=4, ecolor="#14213D")
+        for i, (v, n) in enumerate(zip(vals, ns)):
+            ax.text(i, v + highs[i] + 0.03, f"{v:.2f}", ha="center", fontsize=9)
+            ax.text(i, 0.03, f"n={n}", ha="center", fontsize=8, color="white")
+        ax.axhline(vals[0], color=GREY, ls=":", lw=1)
+        ax.set_xticks(list(xs), [n for _, n in items], fontsize=8)
+        ax.set(ylim=(0, 1.1), title=title)
+        ax.spines[["top", "right"]].set_visible(False)
+    axes[0].set_ylabel("precision (95% ДИ Уилсона)")
+    fig.suptitle("Precision групп алертов против базы того же слоя", fontsize=11)
     fig.tight_layout()
     fig.savefig(fig_dir / "3_protocol_precision.png", dpi=160)
     plt.close(fig)
 
-    # 4. Сигналы для аналитика
-    sig = pd.read_csv(exp / "analyst_signals.csv")
-    sig = sig[sig.period == before]
-    order = [(True, True), (True, False), (False, True), (False, False)]
+    # 4. Сигналы для аналитика (М6, из M-11 шага 7)
+    m6 = m11[m11["слой"] == "35–42"].set_index("группа")
+    keys = ["М6 A: без потоков ✓, прецеденты ✓", "М6 B: без потоков ✓, прецеденты ✗",
+            "М6 C: без потоков ✗, прецеденты ✓", "М6 D: без потоков ✗, прецеденты ✗"]
     names = ["без потоков ✓\nпрецеденты ✓", "без потоков ✓\nпрецеденты ✗", "без потоков ✗\nпрецеденты ✓",
              "без потоков ✗\nпрецеденты ✗"]
-    vals, ns = [], []
-    for h, k in order:
-        r = sig[(sig.holds == h) & (sig.knn_major == k)]
-        vals.append(float(r.precision.iloc[0]) if len(r) else 0.0)
-        ns.append(int(r.n.iloc[0]) if len(r) else 0)
+    vals = [float(m6.loc[k, "precision"]) for k in keys]
+    ns = [int(m6.loc[k, "n"]) for k in keys]
     fig, ax = plt.subplots(figsize=(7, 3.4))
     bar(ax, names, vals, [BLUE, BLUE, ORANGE, ORANGE])
     for i, n in enumerate(ns):
@@ -95,7 +118,7 @@ def main():
     # 5. Камуфляж
     camo = pd.read_csv(a.out / "fragility" / "camouflage.csv").groupby("m").flag_removed.mean()
     fig, ax = plt.subplots(figsize=(5, 3.2))
-    bar(ax, [f"+{m}" for m in camo.index], camo.tolist(), [ORANGE] * len(camo), fmt="{:.0%}")
+    bar(ax, [f"+{m}" for m in camo.index], camo.tolist(), [ORANGE] * len(camo), fmt="{:.1%}")
     ax.set(ylim=(0, 1), xlabel="потоков от случайных licit-транзакций",
            ylabel="доля снятых флагов", title="Камуфляж: верные алерты")
     fig.tight_layout()

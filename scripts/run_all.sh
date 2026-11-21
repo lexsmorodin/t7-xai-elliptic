@@ -3,10 +3,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export KMP_DUPLICATE_LIB_OK=TRUE
-python scripts/step1_models.py
-python scripts/step2_explain.py
-python scripts/step3_cf_knn.py
-python scripts/step4_faithfulness.py
-python scripts/step5_protocol.py
-python scripts/step6_fragility.py
-python scripts/make_figures.py
+${PYTHON:-python} scripts/step1_models.py
+${PYTHON:-python} scripts/step2_explain.py
+${PYTHON:-python} scripts/step3_cf_knn.py
+${PYTHON:-python} scripts/step4_faithfulness.py
+${PYTHON:-python} scripts/step5_protocol.py
+${PYTHON:-python} scripts/step6_fragility.py
+${PYTHON:-python} scripts/step7_protocol_v2.py
+${PYTHON:-python} scripts/make_figures.py
