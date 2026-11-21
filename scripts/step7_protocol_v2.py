@@ -28,6 +28,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from scipy.special import expit
 from sklearn.metrics import average_precision_score, precision_recall_fscore_support
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -164,7 +165,7 @@ def main():
             lg0 = models[s](data.x, data.edge_index, torch.zeros(data.num_edges))
         z0 = log_odds(lg0).numpy()
         z0_all[s] = z0
-        p0 = 1 / (1 + np.exp(-z0))
+        p0 = expit(z0)
         for per, m in [("35–42", test_lab & pre), ("35–49", test_lab)]:
             for name, p in [("с рёбрами", scores[f"gcn_seed{s}"]), ("без рёбер", p0)]:
                 pr, rc, f1, _ = precision_recall_fscore_support(yb[m], (p[m] >= tau[s]).astype(int),

@@ -22,7 +22,7 @@ pip install -r requirements.txt
 
 ## Запуск
 
-Всё сразу, из чистого клона (~50 мин на CPU):
+Всё сразу, из чистого клона (~50 мин на CPU плюс скачивание данных):
 
 ```bash
 bash scripts/run_all.sh
@@ -48,6 +48,8 @@ bash scripts/run_synthetic.sh
 ```
 
 Скрипт пишет только в `data/fake_elliptic/` и `artifacts_test/`. Другой интерпретатор: `PYTHON=python3 bash scripts/run_synthetic.sh`.
+
+**Проверено.** 21.11.2026 полный прогон `run_all.sh` из свежего клона на MacBook Air (M-серия, Python 3.14) занял 48 минут после скачивания данных. Все итоговые таблицы (M-10, M-11, Б.2, Б.3, абляция) совпали с артефактами отчёта до последнего знака.
 
 ## Артефакты шага 1 (`artifacts/`)
 
